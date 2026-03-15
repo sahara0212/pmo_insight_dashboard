@@ -482,7 +482,14 @@ export default function App() {
               </div>
             ) : (
               <button 
-                onClick={signInWithGoogle}
+                onClick={async () => {
+                  try {
+                    await signInWithGoogle();
+                  } catch (err: any) {
+                    console.error("Login error", err);
+                    setError("로그인에 실패했습니다: " + (err.message || "알 수 없는 오류"));
+                  }
+                }}
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-lg transition-all"
               >
                 로그인
