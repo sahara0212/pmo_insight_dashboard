@@ -30,7 +30,9 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: '100mb' }));
+  // Increase limit for large file uploads (up to 50MB)
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
   // API Routes
   app.get("/api/data", (req, res) => {
@@ -79,9 +81,12 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+  
+  // Set timeout to 10 minutes for large uploads
+  server.timeout = 600000;
 }
 
 startServer();
