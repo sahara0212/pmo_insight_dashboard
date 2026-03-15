@@ -427,23 +427,32 @@ export default function App() {
     setError(null);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      // 1. Check API Key
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error("Gemini API Key가 설정되지 않았습니다. 설정 메뉴에서 API 키를 확인해 주세요.");
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
       
-      // Fetch and resize images to reduce payload size and prevent timeouts
+      // 2. Fetch and resize images (Client-side optimization)
+      // We use a smaller max dimension to ensure we don't hit payload limits or browser timeouts
       const imageParts = await Promise.all(files.map(async (f) => {
         try {
           const response = await fetch(f.url);
-          if (!response.ok) throw new Error(`Failed to fetch image: ${f.name}`);
+          if (!response.ok) throw new Error(`이미지 로드 실패: ${f.name}`);
           const blob = await response.blob();
-          const base64Data = await resizeImage(blob);
+          
+          // Resize to 1024px for better performance and lower payload
+          const base64Data = await resizeImage(blob, 1024, 1024);
           return {
             inlineData: {
               mimeType: "image/jpeg",
               data: base64Data
             }
           };
-        } catch (err) {
-          console.warn(`Error processing file ${f.name}, skipping:`, err);
+        } catch (err: any) {
+          console.warn(`파일 처리 중 오류 (${f.name}):`, err);
           return null;
         }
       }));
@@ -451,15 +460,17 @@ export default function App() {
       const validImageParts = imageParts.filter(p => p !== null);
 
       if (validImageParts.length === 0) {
-        throw new Error("분석할 수 있는 유효한 이미지 데이터가 없습니다.");
+        throw new Error("분석할 수 있는 유효한 이미지 데이터가 없습니다. 업로드된 파일을 확인해 주세요.");
       }
 
+      // 3. Call Gemini API directly from the browser
+      // This bypasses Vercel's server-side timeout (10s on Free plan)
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: [
           {
             parts: [
-              { text: `총 ${validImageParts.length}개의 프로젝트 현장 데이터를 분석하여 통합 PMO 전략 대시보드 데이터를 생성하라. 반드시 JSON 형식으로만 응답하라.` },
+              { text: `총 ${validImageParts.length}개의 프로젝트 현장 데이터를 분석하여 통합 PMO 전략 대시보드 데이터를 생성하라. 반드시 JSON 형식으로만 응답하라. 데이터가 많으므로 핵심 위주로 요약하여 응답하라.` },
               ...validImageParts
             ]
           }
@@ -471,35 +482,41 @@ export default function App() {
         }
       });
 
-      if (response.text) {
-        const data = JSON.parse(response.text) as AnalysisData;
-        
-        // Save analysis to Firestore
-        await addDoc(collection(db, 'analysis_results'), {
-          data: JSON.stringify(data),
-          uid: user.uid,
-          createdAt: new Date().toISOString()
-        });
-        
-        setAnalysisData(data);
-        const initialOptions: Record<string, string> = {};
-        data.steerCo.forEach(item => {
-          if (item.options.length > 0) initialOptions[item.id] = item.options[0].id;
-        });
-        setSelectedOptions(initialOptions);
-        setActiveTab('steerco');
-      }
-    } catch (err: any) {
-      console.error("Analysis error", err);
-      
-      // Simple retry logic for "Failed to fetch" or network errors
-      if (actualRetryCount < 2 && (err.message?.includes('fetch') || err.name === 'TypeError')) {
-        console.log(`Retrying analysis... attempt ${actualRetryCount + 1}`);
-        setTimeout(() => analyzeProject(actualRetryCount + 1), 1000);
-        return;
+      if (!response.text) {
+        throw new Error("AI로부터 응답을 받지 못했습니다. 다시 시도해 주세요.");
       }
 
-      setError(err.message || "분석 중 오류가 발생했습니다. 데이터 양이 너무 많으면 일부를 삭제 후 다시 시도해 주세요.");
+      const data = JSON.parse(response.text) as AnalysisData;
+      
+      // 4. Save analysis to Firestore (After successful client-side analysis)
+      await addDoc(collection(db, 'analysis_results'), {
+        data: JSON.stringify(data),
+        uid: user.uid,
+        createdAt: new Date().toISOString()
+      });
+      
+      setAnalysisData(data);
+      const initialOptions: Record<string, string> = {};
+      data.steerCo.forEach(item => {
+        if (item.options.length > 0) initialOptions[item.id] = item.options[0].id;
+      });
+      setSelectedOptions(initialOptions);
+      setActiveTab('steerco');
+
+    } catch (err: any) {
+      console.error("Analysis error details:", err);
+      
+      // Handle specific "Failed to fetch" error which often indicates network/timeout/CORS
+      if (err.message?.includes('fetch') || err.name === 'TypeError') {
+        if (actualRetryCount < 2) {
+          console.log(`네트워크 오류로 인한 재시도 중... (${actualRetryCount + 1}/2)`);
+          setTimeout(() => analyzeProject(actualRetryCount + 1), 2000);
+          return;
+        }
+        setError("네트워크 연결 오류 또는 브라우저 타임아웃이 발생했습니다. 인터넷 연결을 확인하거나 데이터 양(이미지 수)을 줄여서 다시 시도해 주세요.");
+      } else {
+        setError(err.message || "분석 중 알 수 없는 오류가 발생했습니다.");
+      }
     } finally {
       setIsAnalyzing(false);
     }
