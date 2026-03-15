@@ -1,0 +1,38 @@
+{
+  "entities": {
+    "FileMetadata": {
+      "title": "File Metadata",
+      "description": "Metadata for uploaded project files stored in Firebase Storage",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Original file name" },
+        "url": { "type": "string", "description": "Firebase Storage download URL" },
+        "mimeType": { "type": "string", "description": "MIME type of the file" },
+        "uid": { "type": "string", "description": "User ID of the uploader" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Upload timestamp" }
+      },
+      "required": ["name", "url", "uid", "createdAt"]
+    },
+    "AnalysisResult": {
+      "title": "Analysis Result",
+      "description": "AI analysis results for the project",
+      "type": "object",
+      "properties": {
+        "data": { "type": "string", "description": "JSON string of the analysis data" },
+        "uid": { "type": "string", "description": "User ID of the analyst" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Analysis timestamp" }
+      },
+      "required": ["data", "uid", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/files/{fileId}": {
+      "schema": "FileMetadata",
+      "description": "Collection of file metadata"
+    },
+    "/analysis_results/{analysisId}": {
+      "schema": "AnalysisResult",
+      "description": "Collection of analysis results"
+    }
+  }
+}

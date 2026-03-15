@@ -44,6 +44,23 @@ import {
   Cell
 } from 'recharts';
 
+import { auth, db, storage, signInWithGoogle, logout } from './firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { 
+  collection, 
+  addDoc, 
+  query, 
+  where, 
+  orderBy, 
+  onSnapshot, 
+  deleteDoc, 
+  doc, 
+  getDocs,
+  limit,
+  Timestamp
+} from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL, deleteObject, listAll } from 'firebase/storage';
+
 const SYSTEM_INSTRUCTION = `
 너는 1,000억 원 이상의 대형 차세대 금융 시스템 구축 프로젝트를 수십 차례 성공시킨 글로벌 전략 컨설팅 펌의 시니어 파트너이자 최고 위기관리자(PMO)다.
 업로드된 파편화된 현장 데이터(화이트보드, 일정표, 회의록 등)를 바탕으로, 일반적인 관리 수준을 넘어선 '입체적 전략 진단'을 수행하라.
@@ -149,7 +166,8 @@ interface AnalysisData {
 }
 
 export default function App() {
-  const [files, setFiles] = useState<{ name: string; data: string; mimeType: string }[]>([]);
+  const [user, setUser] = useState<User | null>(null);
+  const [files, setFiles] = useState<{ id: string; name: string; url: string; mimeType: string }[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
   const [activeTab, setActiveTab] = useState<'steerco' | 'resources' | 'ceoreport' | 'upload'>('upload');
@@ -159,36 +177,68 @@ export default function App() {
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch initial data
-  const fetchData = useCallback(async (shouldSwitchTab = false) => {
-    try {
-      const res = await fetch('/api/data');
-      if (!res.ok) throw new Error('데이터를 가져오는데 실패했습니다.');
-      const data = await res.json();
-      if (data.uploads) {
-        setFiles(data.uploads.map((u: any) => ({ name: u.name, data: u.data, mimeType: u.mime_type })));
+  // Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setUser(user);
+      if (!user) {
+        setFiles([]);
+        setAnalysisData(null);
       }
-      if (data.latestAnalysis) {
-        setAnalysisData(data.latestAnalysis);
-        // Initialize options
-        const initialOptions: Record<string, string> = {};
-        data.latestAnalysis.steerCo.forEach((item: any) => {
-          if (item.options.length > 0) initialOptions[item.id] = item.options[0].id;
-        });
-        setSelectedOptions(initialOptions);
-        if (shouldSwitchTab) setActiveTab('steerco');
-      } else if (shouldSwitchTab) {
-        setActiveTab('upload');
-      }
-    } catch (err: any) {
-      console.error("Failed to fetch data", err);
-      setError(err.message);
-    }
+    });
+    return () => unsubscribe();
   }, []);
 
+  // Firestore Listeners
   useEffect(() => {
-    fetchData(true);
-  }, [fetchData]);
+    if (!user) return;
+
+    // Listen for files
+    const qFiles = query(
+      collection(db, 'files'), 
+      where('uid', '==', user.uid),
+      orderBy('createdAt', 'desc')
+    );
+    const unsubFiles = onSnapshot(qFiles, (snapshot) => {
+      const fileList = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      })) as any[];
+      setFiles(fileList);
+    }, (err) => {
+      console.error("Files listener error", err);
+      setError("파일 목록을 가져오는데 실패했습니다.");
+    });
+
+    // Listen for latest analysis
+    const qAnalysis = query(
+      collection(db, 'analysis_results'),
+      where('uid', '==', user.uid),
+      orderBy('createdAt', 'desc'),
+      limit(1)
+    );
+    const unsubAnalysis = onSnapshot(qAnalysis, (snapshot) => {
+      if (!snapshot.empty) {
+        const data = JSON.parse(snapshot.docs[0].data().data) as AnalysisData;
+        setAnalysisData(data);
+        
+        // Initialize options if not set
+        const initialOptions: Record<string, string> = {};
+        data.steerCo.forEach(item => {
+          if (item.options.length > 0) initialOptions[item.id] = item.options[0].id;
+        });
+        setSelectedOptions(prev => Object.keys(prev).length === 0 ? initialOptions : prev);
+      }
+    }, (err) => {
+      console.error("Analysis listener error", err);
+      setError("분석 결과를 가져오는데 실패했습니다.");
+    });
+
+    return () => {
+      unsubFiles();
+      unsubAnalysis();
+    };
+  }, [user]);
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = e.target.files;
@@ -231,6 +281,10 @@ export default function App() {
   };
 
   const uploadFiles = async (newFiles: File[]) => {
+    if (!user) {
+      setError("로그인이 필요합니다.");
+      return;
+    }
     if (newFiles.length === 0) return;
     
     setIsUploading(true);
@@ -244,58 +298,71 @@ export default function App() {
       return;
     }
     
-    const filePromises = validFiles.map(file => {
-      return new Promise<{ name: string; data: string; mimeType: string }>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = async () => {
-          const base64 = reader.result as string;
-          // Compress image before sending to server
-          const compressedData = await compressImage(base64);
-          resolve({
-            name: file.name.replace(/\.[^/.]+$/, "") + ".jpg", // Rename to .jpg as we compress to jpeg
-            data: compressedData,
-            mimeType: 'image/jpeg'
-          });
-        };
-        reader.readAsDataURL(file);
-      });
-    });
-
     try {
-      const processedFiles = await Promise.all(filePromises);
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ files: processedFiles })
-      });
-      
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || "서버 업로드 용량 제한을 초과했습니다. 파일을 나누어 업로드하거나 더 작은 파일을 사용해주세요.");
+      for (const file of validFiles) {
+        // 1. Upload to Firebase Storage
+        const fileRef = ref(storage, `uploads/${user.uid}/${Date.now()}_${file.name}`);
+        const snapshot = await uploadBytes(fileRef, file);
+        const downloadURL = await getDownloadURL(snapshot.ref);
+
+        // 2. Save metadata to Firestore
+        await addDoc(collection(db, 'files'), {
+          name: file.name,
+          url: downloadURL,
+          mimeType: file.type,
+          uid: user.uid,
+          createdAt: new Date().toISOString()
+        });
       }
-      
-      await fetchData(false);
     } catch (err: any) {
-      setError(err.message);
+      console.error("Upload error", err);
+      setError("파일 업로드에 실패했습니다. " + err.message);
     } finally {
       setIsUploading(false);
     }
   };
 
   const clearAllData = async () => {
+    if (!user) return;
     if (!confirm("모든 데이터를 삭제하시겠습니까?")) return;
+    
     try {
-      await fetch('/api/data', { method: 'DELETE' });
+      // 1. Delete Firestore files
+      const qFiles = query(collection(db, 'files'), where('uid', '==', user.uid));
+      const fileDocs = await getDocs(qFiles);
+      for (const d of fileDocs.docs) {
+        await deleteDoc(doc(db, 'files', d.id));
+      }
+
+      // 2. Delete Firestore analysis
+      const qAnalysis = query(collection(db, 'analysis_results'), where('uid', '==', user.uid));
+      const analysisDocs = await getDocs(qAnalysis);
+      for (const d of analysisDocs.docs) {
+        await deleteDoc(doc(db, 'analysis_results', d.id));
+      }
+
+      // 3. Delete Storage files (optional, but good practice)
+      const storageRef = ref(storage, `uploads/${user.uid}`);
+      try {
+        const listRes = await listAll(storageRef);
+        for (const item of listRes.items) {
+          await deleteObject(item);
+        }
+      } catch (e) {
+        console.warn("Storage cleanup failed", e);
+      }
+
       setFiles([]);
       setAnalysisData(null);
       setSelectedOptions({});
     } catch (err) {
+      console.error("Clear error", err);
       setError("데이터 삭제에 실패했습니다.");
     }
   };
 
   const analyzeProject = async () => {
-    if (files.length === 0) return;
+    if (!user || files.length === 0) return;
 
     setIsAnalyzing(true);
     setError(null);
@@ -303,11 +370,22 @@ export default function App() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
-      const imageParts = files.map(f => ({
-        inlineData: {
-          mimeType: f.mimeType,
-          data: f.data.split(',')[1]
-        }
+      // Fetch images from URLs and convert to base64 for Gemini
+      const imageParts = await Promise.all(files.map(async (f) => {
+        const response = await fetch(f.url);
+        const blob = await response.blob();
+        return new Promise<any>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => {
+            resolve({
+              inlineData: {
+                mimeType: f.mimeType,
+                data: (reader.result as string).split(',')[1]
+              }
+            });
+          };
+          reader.readAsDataURL(blob);
+        });
       }));
 
       const response = await ai.models.generateContent({
@@ -329,11 +407,12 @@ export default function App() {
 
       if (response.text) {
         const data = JSON.parse(response.text) as AnalysisData;
-        // Save analysis to server
-        await fetch('/api/analysis', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data })
+        
+        // Save analysis to Firestore
+        await addDoc(collection(db, 'analysis_results'), {
+          data: JSON.stringify(data),
+          uid: user.uid,
+          createdAt: new Date().toISOString()
         });
         
         setAnalysisData(data);
@@ -345,6 +424,7 @@ export default function App() {
         setActiveTab('steerco');
       }
     } catch (err: any) {
+      console.error("Analysis error", err);
       setError(err.message || "분석 중 오류가 발생했습니다.");
     } finally {
       setIsAnalyzing(false);
@@ -385,10 +465,30 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-lg font-bold tracking-tight text-white">전략적 PMO 대시보드</h1>
-              <p className="text-[10px] font-mono text-indigo-400 uppercase tracking-widest">Enterprise Innovation Suite</p>
+              <div className="flex items-center gap-2">
+                <p className="text-[10px] font-mono text-indigo-400 uppercase tracking-widest">Enterprise Innovation Suite</p>
+                <span className="text-[8px] bg-indigo-900/50 text-indigo-300 px-1 rounded border border-indigo-800/50">v2.0-FIREBASE</span>
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {user ? (
+              <div className="flex items-center gap-3">
+                <div className="hidden md:flex flex-col items-end">
+                  <span className="text-[10px] font-bold text-white">{user.displayName || user.email}</span>
+                  <button onClick={logout} className="text-[9px] text-slate-500 hover:text-white uppercase tracking-tighter">로그아웃</button>
+                </div>
+                <img src={user.photoURL || `https://ui-avatars.com/api/?name=${user.email}`} className="w-8 h-8 rounded-full border border-slate-700" referrerPolicy="no-referrer" />
+              </div>
+            ) : (
+              <button 
+                onClick={signInWithGoogle}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-lg transition-all"
+              >
+                로그인
+              </button>
+            )}
+
             {analysisData && (
               <span className="hidden sm:block text-[10px] font-bold text-slate-400 uppercase tracking-widest bg-slate-900 px-3 py-1 rounded-full border border-slate-800">
                 {analysisData.companyName}
@@ -889,23 +989,16 @@ export default function App() {
                             setIsUploading(false);
                             setIsAnalyzing(false);
                             setError(null);
-                            fetchData(false);
                           }}
                           className="text-xs font-bold text-amber-500 uppercase hover:underline"
                         >
                           상태 초기화 (Reset)
                         </button>
                         <button 
-                          onClick={() => fetchData(false)}
-                          className="text-xs font-bold text-indigo-400 uppercase hover:underline"
-                        >
-                          데이터 새로고침
-                        </button>
-                        <button 
                           onClick={clearAllData}
                           className="text-xs font-bold text-red-500 uppercase hover:underline"
                         >
-                          서버 데이터 전체 삭제
+                          사용자 데이터 전체 삭제
                         </button>
                       </div>
                     </div>
@@ -951,7 +1044,7 @@ export default function App() {
                           <div className="grid grid-cols-4 md:grid-cols-6 gap-4">
                             {files.map((f, i) => (
                               <div key={i} className="aspect-square rounded-xl overflow-hidden border border-slate-800 bg-slate-900 relative group">
-                                <img src={f.data} alt={f.name} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" />
+                                <img src={f.url} alt={f.name} className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity" referrerPolicy="no-referrer" />
                                 <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40">
                                   <span className="text-[8px] text-white font-mono truncate px-2">{f.name}</span>
                                 </div>
