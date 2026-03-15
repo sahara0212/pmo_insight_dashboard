@@ -59,7 +59,7 @@ import {
   limit,
   Timestamp
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL, deleteObject, listAll } from 'firebase/storage';
+import { ref, uploadBytesResumable, getDownloadURL, deleteObject, listAll } from 'firebase/storage';
 
 const SYSTEM_INSTRUCTION = `
 너는 1,000억 원 이상의 대형 차세대 금융 시스템 구축 프로젝트를 수십 차례 성공시킨 글로벌 전략 컨설팅 펌의 시니어 파트너이자 최고 위기관리자(PMO)다.
@@ -175,6 +175,7 @@ export default function App() {
   const [selectedOptions, setSelectedOptions] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Auth Listener
@@ -288,6 +289,7 @@ export default function App() {
     if (newFiles.length === 0) return;
     
     setIsUploading(true);
+    setUploadProgress(0);
     setError(null);
     
     const validFiles = newFiles.filter(file => file.type.startsWith('image/'));
@@ -299,19 +301,40 @@ export default function App() {
     }
     
     try {
-      for (const file of validFiles) {
-        // 1. Upload to Firebase Storage
-        const fileRef = ref(storage, `uploads/${user.uid}/${Date.now()}_${file.name}`);
-        const snapshot = await uploadBytes(fileRef, file);
-        const downloadURL = await getDownloadURL(snapshot.ref);
+      let completedFiles = 0;
+      const totalFiles = validFiles.length;
 
-        // 2. Save metadata to Firestore
-        await addDoc(collection(db, 'files'), {
-          name: file.name,
-          url: downloadURL,
-          mimeType: file.type,
-          uid: user.uid,
-          createdAt: new Date().toISOString()
+      for (const file of validFiles) {
+        // 1. Upload to Firebase Storage with progress
+        const fileRef = ref(storage, `uploads/${user.uid}/${Date.now()}_${file.name}`);
+        const uploadTask = uploadBytesResumable(fileRef, file);
+
+        await new Promise<void>((resolve, reject) => {
+          uploadTask.on('state_changed', 
+            (snapshot) => {
+              const fileProgress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+              // Calculate overall progress: (completed files + current file progress) / total files
+              const overallProgress = ((completedFiles + (fileProgress / 100)) / totalFiles) * 100;
+              setUploadProgress(Math.round(overallProgress));
+            }, 
+            (error) => {
+              reject(error);
+            }, 
+            async () => {
+              const downloadURL = await getDownloadURL(uploadTask.snapshot.ref);
+              // 2. Save metadata to Firestore
+              await addDoc(collection(db, 'files'), {
+                name: file.name,
+                url: downloadURL,
+                mimeType: file.type,
+                uid: user.uid,
+                createdAt: new Date().toISOString()
+              });
+              completedFiles++;
+              setUploadProgress(Math.round((completedFiles / totalFiles) * 100));
+              resolve();
+            }
+          );
         });
       }
     } catch (err: any) {
@@ -319,6 +342,7 @@ export default function App() {
       setError("파일 업로드에 실패했습니다. " + err.message);
     } finally {
       setIsUploading(false);
+      setUploadProgress(0);
     }
   };
 
@@ -1017,8 +1041,20 @@ export default function App() {
                         if (e.dataTransfer.files) uploadFiles(Array.from(e.dataTransfer.files));
                       }}
                       onClick={() => fileInputRef.current?.click()}
-                      className="border-2 border-dashed border-slate-800 rounded-3xl p-16 flex flex-col items-center justify-center gap-4 bg-slate-900/30 hover:bg-slate-900/50 hover:border-indigo-900/50 transition-all cursor-pointer group"
+                      className="border-2 border-dashed border-slate-800 rounded-3xl p-16 flex flex-col items-center justify-center gap-4 bg-slate-900/30 hover:bg-slate-900/50 hover:border-indigo-900/50 transition-all cursor-pointer group relative overflow-hidden"
                     >
+                      {isUploading && (
+                        <div className="absolute inset-0 bg-indigo-600/10 flex flex-col items-center justify-center gap-4 backdrop-blur-sm z-10">
+                          <div className="w-64 h-2 bg-slate-800 rounded-full overflow-hidden">
+                            <motion.div 
+                              initial={{ width: 0 }}
+                              animate={{ width: `${uploadProgress}%` }}
+                              className="h-full bg-indigo-500"
+                            />
+                          </div>
+                          <p className="text-indigo-400 font-mono text-sm font-bold">{uploadProgress}% UPLOADING...</p>
+                        </div>
+                      )}
                       <div className="w-20 h-20 rounded-full bg-slate-800 flex items-center justify-center group-hover:scale-110 transition-transform">
                         {isUploading ? <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" /> : <Upload className="w-8 h-8 text-slate-500 group-hover:text-indigo-500" />}
                       </div>
