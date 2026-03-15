@@ -165,6 +165,40 @@ interface AnalysisData {
   ceoReport: string;
 }
 
+const resizeImage = (blob: Blob, maxWidth = 1280, maxHeight = 1280): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.src = URL.createObjectURL(blob);
+    img.onload = () => {
+      URL.revokeObjectURL(img.src);
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > maxWidth) {
+          height *= maxWidth / width;
+          width = maxWidth;
+        }
+      } else {
+        if (height > maxHeight) {
+          width *= maxHeight / height;
+          height = maxHeight;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx?.drawImage(img, 0, 0, width, height);
+      
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+      resolve(dataUrl.split(',')[1]);
+    };
+    img.onerror = reject;
+  });
+};
+
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [files, setFiles] = useState<{ id: string; name: string; url: string; mimeType: string }[]>([]);
@@ -385,7 +419,8 @@ export default function App() {
     }
   };
 
-  const analyzeProject = async () => {
+  const analyzeProject = async (retryCount: number | React.MouseEvent = 0) => {
+    const actualRetryCount = typeof retryCount === 'number' ? retryCount : 0;
     if (!user || files.length === 0) return;
 
     setIsAnalyzing(true);
@@ -394,37 +429,44 @@ export default function App() {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       
-      // Fetch images from URLs and convert to base64 for Gemini
+      // Fetch and resize images to reduce payload size and prevent timeouts
       const imageParts = await Promise.all(files.map(async (f) => {
-        const response = await fetch(f.url);
-        const blob = await response.blob();
-        return new Promise<any>((resolve) => {
-          const reader = new FileReader();
-          reader.onloadend = () => {
-            resolve({
-              inlineData: {
-                mimeType: f.mimeType,
-                data: (reader.result as string).split(',')[1]
-              }
-            });
+        try {
+          const response = await fetch(f.url);
+          if (!response.ok) throw new Error(`Failed to fetch image: ${f.name}`);
+          const blob = await response.blob();
+          const base64Data = await resizeImage(blob);
+          return {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: base64Data
+            }
           };
-          reader.readAsDataURL(blob);
-        });
+        } catch (err) {
+          console.warn(`Error processing file ${f.name}, skipping:`, err);
+          return null;
+        }
       }));
+
+      const validImageParts = imageParts.filter(p => p !== null);
+
+      if (validImageParts.length === 0) {
+        throw new Error("분석할 수 있는 유효한 이미지 데이터가 없습니다.");
+      }
 
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: [
           {
             parts: [
-              { text: `총 ${files.length}개의 프로젝트 현장 데이터를 분석하여 통합 PMO 전략 대시보드 데이터를 생성하라. 반드시 JSON 형식으로만 응답하라.` },
-              ...imageParts
+              { text: `총 ${validImageParts.length}개의 프로젝트 현장 데이터를 분석하여 통합 PMO 전략 대시보드 데이터를 생성하라. 반드시 JSON 형식으로만 응답하라.` },
+              ...validImageParts
             ]
           }
         ],
         config: {
           systemInstruction: SYSTEM_INSTRUCTION,
-          temperature: 0.2,
+          temperature: 0.1,
           responseMimeType: "application/json"
         }
       });
@@ -449,7 +491,15 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Analysis error", err);
-      setError(err.message || "분석 중 오류가 발생했습니다.");
+      
+      // Simple retry logic for "Failed to fetch" or network errors
+      if (actualRetryCount < 2 && (err.message?.includes('fetch') || err.name === 'TypeError')) {
+        console.log(`Retrying analysis... attempt ${actualRetryCount + 1}`);
+        setTimeout(() => analyzeProject(actualRetryCount + 1), 1000);
+        return;
+      }
+
+      setError(err.message || "분석 중 오류가 발생했습니다. 데이터 양이 너무 많으면 일부를 삭제 후 다시 시도해 주세요.");
     } finally {
       setIsAnalyzing(false);
     }
