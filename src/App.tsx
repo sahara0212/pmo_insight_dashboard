@@ -165,6 +165,65 @@ interface AnalysisData {
   ceoReport: string;
 }
 
+// 시연용 목업 데이터 — Firebase 데이터 없이 대시보드를 채운다.
+const MOCK_ANALYSIS: AnalysisData = {
+  companyName: "가나다전자 (데모)",
+  dashboard: {
+    overallProgress: 68,
+    monthlyTimeline: [
+      { month: '1월', planned: 10, actual: 8 },
+      { month: '2월', planned: 25, actual: 22 },
+      { month: '3월', planned: 40, actual: 38 },
+      { month: '4월', planned: 58, actual: 52 },
+      { month: '5월', planned: 75, actual: 68 },
+      { month: '6월', planned: 90, actual: 80 },
+    ],
+    pdca: {
+      plan: "차세대 ERP 전환 로드맵 수립 — 12개 모듈, 3단계 릴리즈.",
+      do: "1단계(재무·구매) 개발 완료, 통합테스트 진행 중.",
+      check: "UAT 결함 23건 중 18건 해결, 잔여 5건 차주 마감.",
+      act: "테스트 리소스 2명 추가 투입, 2단계 일정 1주 조정.",
+    },
+    stakeholderEngagement: {
+      businessParticipation: 72,
+      testReadiness: 64,
+      feedbackLoopSpeed: 'MEDIUM',
+    },
+  },
+  resourceSimulation: {
+    availablePool: [
+      { id: 'r1', name: '백엔드 개발', count: 6, status: '여유', skill: 'Java/Spring' },
+      { id: 'r2', name: '프론트 개발', count: 4, status: '적정', skill: 'React/TS' },
+      { id: 'r3', name: 'QA', count: 2, status: '부족', skill: '통합테스트' },
+      { id: 'r4', name: 'PM/PMO', count: 2, status: '적정', skill: '일정·리스크' },
+    ],
+    bottlenecks: [
+      { id: 'b1', name: 'QA 인력', requiredCount: 4, currentCount: 2, impact: 'UAT 마감 1주 지연 위험' },
+      { id: 'b2', name: '데이터 마이그레이션', requiredCount: 3, currentCount: 2, impact: '2단계 컷오버 영향' },
+    ],
+  },
+  steerCo: [
+    {
+      id: 's1', item: 'UAT 결함 처리 지연', priority: 'CRITICAL', riskWeight: 85,
+      description: '잔여 결함 5건이 컷오버 일정에 직접 영향. 의사결정 필요.',
+      options: [
+        { id: 'o1', label: 'QA 2명 긴급 투입', impact: '마감 준수, 비용 증가', scheduleShift: 0, resourceMove: 'QA +2' },
+        { id: 'o2', label: '경미 결함 차기 릴리즈 이월', impact: '일정 준수, 품질 리스크', scheduleShift: 0 },
+        { id: 'o3', label: '컷오버 1주 연기', impact: '안전하나 비즈 영향', scheduleShift: 7 },
+      ],
+    },
+    {
+      id: 's2', item: '데이터 마이그레이션 검증 범위', priority: 'HIGH', riskWeight: 60,
+      description: '레거시 데이터 정합성 검증 범위 확정 필요.',
+      options: [
+        { id: 'o1', label: '전수 검증', impact: '안전, 일정 +3일', scheduleShift: 3 },
+        { id: 'o2', label: '표본 검증', impact: '일정 준수, 잔존 리스크', scheduleShift: 0 },
+      ],
+    },
+  ],
+  ceoReport: "## 경영 요약\n\n차세대 ERP 전환은 **전체 68%** 진척(계획 대비 -7%p)으로 정상 범위 내 경미 지연 상태입니다.\n\n- **핵심 리스크**: UAT 잔여 결함 5건이 컷오버 일정에 직접 영향. QA 인력 부족(2/4)이 병목.\n- **권고**: QA 2명 긴급 투입 시 일정 준수 가능(추가 비용 발생).\n- **다음 마일스톤**: 2단계(영업·물류) 7월 착수 예정.\n\n> 본 보고서는 시연용 샘플 데이터입니다.",
+};
+
 const resizeImage = (blob: Blob, maxWidth = 1280, maxHeight = 1280): Promise<string> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -594,12 +653,21 @@ export default function App() {
             )}
             
             <button
+              onClick={() => { setAnalysisData(MOCK_ANALYSIS); setActiveTab('steerco'); }}
+              title="시연용 샘플 데이터로 대시보드 채우기"
+              className="flex items-center gap-2 px-4 py-2 text-white text-xs font-bold rounded-lg transition-all shadow-lg bg-violet-600 hover:bg-violet-500"
+            >
+              <Activity className="w-4 h-4" />
+              <span className="hidden md:inline">데모 데이터</span>
+            </button>
+
+            <button
               onClick={analyzeProject}
               disabled={isAnalyzing || isUploading || files.length === 0}
               className={cn(
                 "flex items-center gap-2 px-4 py-2 text-white text-xs font-bold rounded-lg transition-all shadow-lg",
-                (isAnalyzing || isUploading) ? "bg-indigo-600 animate-pulse" : 
-                files.length > 0 ? "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-900/20" : 
+                (isAnalyzing || isUploading) ? "bg-indigo-600 animate-pulse" :
+                files.length > 0 ? "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-900/20" :
                 "bg-slate-800 opacity-50 cursor-not-allowed"
               )}
             >
